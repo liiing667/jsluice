@@ -99,10 +99,8 @@ func (u *UserPattern) objectMatcher() SecretMatcher {
 		matched := 0
 
 		for _, pat := range u.Object {
-			matcher := pat.pairMatcher()
-
 			for _, pair := range pairs {
-				if matcher.Fn(pair) != nil {
+				if pat.matchesPair(pair) {
 					matched++
 					break
 				}
@@ -126,28 +124,21 @@ func (u *UserPattern) objectMatcher() SecretMatcher {
 // pairMatcher returns a SecretMatcher for matching against key/value pairs
 func (u *UserPattern) pairMatcher() SecretMatcher {
 	return SecretMatcher{"(pair) @matches", func(n *Node) *Secret {
+		if !u.matchesPair(n) {
+			return nil
+		}
 
 		key := n.ChildByFieldName("key")
-		if key == nil || !u.MatchKey(key.RawString()) {
-			return nil
-		}
-
 		value := n.ChildByFieldName("value")
-		if value == nil || value.Type() != "string" {
-			return nil
-		}
-
-		if !u.MatchValue(value.RawString()) {
-			return nil
-		}
 
 		secret := &Secret{
 			Kind: u.Name,
 			Data: map[string]string{
 				"key":   key.RawString(),
-				"value": value.RawString(),
+				"value": value.StringyValue(),
 			},
 			Severity: u.Severity,
+			Source:   value.Content(),
 		}
 
 		parent := n.Parent()
@@ -162,10 +153,38 @@ func (u *UserPattern) pairMatcher() SecretMatcher {
 	}}
 }
 
+// matchesPair reports whether the key and (string-like) value of a pair node
+// satisfy both the key and value regular expressions. The value is compared
+// against its decoded literal value, so escape sequences, cross-fragment
+// concatenation and template literals are handled correctly.
+func (u *UserPattern) matchesPair(n *Node) bool {
+	if n == nil || n.Type() != "pair" {
+		return false
+	}
+
+	key := n.ChildByFieldName("key")
+	if key == nil || !u.MatchKey(key.DecodedString()) {
+		return false
+	}
+
+	value := n.ChildByFieldName("value")
+	if value == nil || !value.IsStringy() {
+		return false
+	}
+
+	return u.MatchValue(value.StringyValue())
+}
+
 // stringMatcher returns a SecretMatcher for matching against string literals
 func (u *UserPattern) stringMatcher() SecretMatcher {
-	return SecretMatcher{"(string) @matches", func(n *Node) *Secret {
-		in := n.RawString()
+	return SecretMatcher{"[(string) (template_string) (binary_expression)] @matches", func(n *Node) *Secret {
+		// only evaluate the outermost string-like expression so that
+		// concatenated strings don't match once per fragment
+		if !n.IsOutermostStringy() {
+			return nil
+		}
+
+		in := n.LiteralValue()
 		if !u.MatchValue(in) {
 			return nil
 		}
@@ -174,6 +193,7 @@ func (u *UserPattern) stringMatcher() SecretMatcher {
 			Kind:     u.Name,
 			Data:     map[string]string{"match": in},
 			Severity: u.Severity,
+			Source:   n.Content(),
 		}
 
 		parent := n.Parent()

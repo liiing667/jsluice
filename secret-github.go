@@ -7,8 +7,12 @@ import (
 func githubKeyMatcher() SecretMatcher {
 	githubKey := regexp.MustCompile("([a-zA-Z0-9_-]{2,}:)?ghp_[a-zA-Z0-9]{30,}")
 
-	return SecretMatcher{"(string) @matches", func(n *Node) *Secret {
-		str := n.RawString()
+	return SecretMatcher{"[(string) (template_string) (binary_expression)] @matches", func(n *Node) *Secret {
+		if !n.IsOutermostStringy() {
+			return nil
+		}
+
+		str := n.LiteralValue()
 
 		if !githubKey.MatchString(str) {
 			return nil
@@ -24,13 +28,19 @@ func githubKeyMatcher() SecretMatcher {
 			Data:     data,
 		}
 
-		// If the key is in an object we want to include that whole object as context
-		parent := n.Parent()
-		if parent == nil || parent.Type() != "pair" {
+		// If the key is in an object we want to include that whole object
+		// as context. The pair node may be above a concatenation or template
+		// expression, so walk up until we find it.
+		enclosing := n.Parent()
+		for enclosing != nil && enclosing.IsValid() && enclosing.Type() != "pair" {
+			enclosing = enclosing.Parent()
+		}
+
+		if enclosing == nil || !enclosing.IsValid() {
 			return match
 		}
 
-		grandparent := parent.Parent()
+		grandparent := enclosing.Parent()
 		if grandparent == nil || grandparent.Type() != "object" {
 			return match
 		}

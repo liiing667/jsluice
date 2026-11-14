@@ -214,6 +214,9 @@ And the output of `jsluice secrets` when run against that file:
   },
   "filename": "awskey.js",
   "severity": "high",
+  "line": 3,
+  "column": 13,
+  "source": "\"AKIAIOSFODNN7EXAMPLE\"",
   "context": {
     "awsKey": "AKIAIOSFODNN7EXAMPLE",
     "awsSecret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -227,6 +230,20 @@ The key and associated secret are put in the `data` field with predictable names
 the automation of, for example, checking the validity of found secrets.
 
 The entire object in which the secret was found is included in the `content` field.
+
+The `line` and `column` fields give the 1-based position of the match, while `source`
+contains the original, unmodified source code (including any quotes, escape sequences or
+string concatenation) so that findings can be traced back to the exact location.
+
+Regular expressions are matched against the *decoded* value rather than the raw source
+text. That means escape sequences (e.g. `"AKIA\u0049OSFODNN7EXAMPLE"`), strings built up
+with concatenation (e.g. `"AKIA" + "IOSFODNN7EXAMPLE"`) and template literals
+(e.g. `` `AKIAIOSFODNN7EXAMPLE` ``) are all evaluated to their literal value before
+matching, without executing any JavaScript. Values that cannot be known statically, such
+as variable references or template substitutions, are replaced with `EXPR`.
+
+Findings are deduplicated by their content: the same value is only reported once, even
+when it appears in multiple input files or in multiple records of a WARC file.
 
 #### Custom Secret Matchers
 

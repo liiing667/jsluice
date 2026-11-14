@@ -30,6 +30,7 @@ func (i item) String() string {
 		return i.val
 	case itemSingleEscape:
 		escapes := map[string]string{
+			"0": "\x00",
 			"b": "\b",
 			"f": "\f",
 			"n": "\n",
@@ -181,11 +182,12 @@ func (s *stringLexer) String() string {
 
 // DecodeString accepts a raw string as it might be found in some
 // JavaScript source code, and converts any escape sequences. E.g:
-//   foo\x3dbar -> foo=bar // Hex escapes
-//   foo\u003Dbar -> foo=bar // Unicode escapes
-//   foo\u{003D}bar -> foo=bar // Braced unicode escapes
-//   foo\075bar -> foo=bar // Octal escape
-//   foo\"bar -> foo"bar // Single character escapes
+//
+//	foo\x3dbar -> foo=bar // Hex escapes
+//	foo\u003Dbar -> foo=bar // Unicode escapes
+//	foo\u{003D}bar -> foo=bar // Braced unicode escapes
+//	foo\075bar -> foo=bar // Octal escape
+//	foo\"bar -> foo"bar // Single character escapes
 func DecodeString(in string) string {
 	in = dequote(in)
 	l := newStringLexer(in)
@@ -204,17 +206,21 @@ func DecodeString(in string) string {
 		l.Next()
 		l.Ignore()
 
-		switch l.Next() {
+		escaped := l.Next()
+		switch escaped {
 		case 'b', 'f', 'n', 'r', 't', 'v', '\'', '"', '\\':
 			l.Emit(itemSingleEscape)
-		case '0':
-			// It's a \0 (null)
-			if !unicode.IsDigit(l.Peek()) {
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			// A lone \0 is a null escape. Any other octal digit, or a
+			// \0 followed by more octal digits, starts an octal escape.
+			// Legacy octal escapes can be up to three digits long.
+			if escaped == '0' && !unicode.IsDigit(l.Peek()) {
 				l.Emit(itemSingleEscape)
 				continue
 			}
-			// It's an octal escape
-			l.AcceptRun("01234567")
+
+			// Up to two more octal digits may follow the first one
+			l.AcceptN("01234567", 2)
 			l.Emit(itemOctalEscape)
 		case 'x':
 			// ignore the x

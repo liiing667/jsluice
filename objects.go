@@ -28,6 +28,13 @@ func (o Object) AsMap() map[string]string {
 	}
 
 	for _, k := range o.GetKeys() {
+		value := o.GetNode(k)
+		if value != nil && value.IsValid() {
+			if str := value.StringyValue(); str != "" {
+				out[k] = str
+				continue
+			}
+		}
 		out[k] = o.GetString(k, "")
 	}
 	return out

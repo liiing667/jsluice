@@ -12,9 +12,12 @@ import (
 
 // ExpressionPlaceholder is the string used to replace any
 // expressions when string concatenations are collapsed. E.g:
-//   "prefix" + someVar + "suffix"
+//
+//	"prefix" + someVar + "suffix"
+//
 // Would become:
-//   prefixEXPRsuffix
+//
+//	prefixEXPRsuffix
 var ExpressionPlaceholder = "EXPR"
 
 // Node is a wrapper around a tree-sitter node. It serves as
@@ -169,11 +172,11 @@ func (n *Node) PrevNamedSibling() *Node {
 // at least somewhat easily parseable. It's common to build URLs out
 // of variables and function calls so we want to turn something like:
 //
-//  './upload.php?profile='+res.id+'&show='+$('.participate_modal_container').attr('data-val')
+//	'./upload.php?profile='+res.id+'&show='+$('.participate_modal_container').attr('data-val')
 //
 // Into something more like:
 //
-//  ./upload.php?profile=EXPR&show=EXPR
+//	./upload.php?profile=EXPR&show=EXPR
 //
 // The value of ExpressionPlaceholder is used as a placeholder, defaulting to 'EXPR'
 func (n *Node) CollapsedString() string {
@@ -188,10 +191,167 @@ func (n *Node) CollapsedString() string {
 			n.ChildByFieldName("right").CollapsedString(),
 		)
 	case "string":
-		return n.RawString()
+		return n.DecodedString()
 	default:
 		return ExpressionPlaceholder
 	}
+}
+
+// LiteralValue returns the value a string-like node would evaluate to at
+// runtime, without actually executing any JavaScript. Escape sequences are
+// decoded, string concatenations are joined, and template substitutions (as
+// well as any other non-literal expression) are replaced with the value of
+// ExpressionPlaceholder. An empty string is returned for nodes that are not
+// string-like.
+func (n *Node) LiteralValue() string {
+	return n.literalValue()
+}
+
+// literalValue does the actual work for LiteralValue.
+func (n *Node) literalValue() string {
+	if !n.IsValid() {
+		return ""
+	}
+
+	switch n.Type() {
+	case "string":
+		return n.DecodedString()
+
+	case "template_string":
+		return n.templateLiteralValue()
+
+	case "binary_expression":
+		// Only the + operator is used for string concatenation
+		if n.operator() != "+" {
+			return ExpressionPlaceholder
+		}
+
+		left := n.ChildByFieldName("left")
+		right := n.ChildByFieldName("right")
+
+		return left.literalValue() + right.literalValue()
+
+	case "parenthesized_expression":
+		inner := n.NamedChild(0)
+		if inner == nil || !inner.IsValid() {
+			return ExpressionPlaceholder
+		}
+		return inner.literalValue()
+
+	default:
+		return ExpressionPlaceholder
+	}
+}
+
+// templateLiteralValue builds a stable value for a template_string node.
+// The literal chunks have their escape sequences decoded, while each
+// template_substitution is replaced with the ExpressionPlaceholder.
+func (n *Node) templateLiteralValue() string {
+	out := &strings.Builder{}
+
+	content := n.Content()
+
+	// Strip the surrounding backticks so that only the template body
+	// is considered when slicing out the literal chunks.
+	body := content
+	if len(body) >= 2 && body[0] == '`' && body[len(body)-1] == '`' {
+		body = body[1 : len(body)-1]
+	}
+
+	// The literal chunks of a template string are not represented as
+	// child nodes; only the ${...} parts are (template_substitution).
+	// Walk the substitution nodes and slice the surrounding text out
+	// of the node content using their byte offsets.
+	offset := 0
+	for _, child := range n.NamedChildren() {
+		if child.Type() != "template_substitution" {
+			continue
+		}
+
+		start := int(child.node.StartByte()) - int(n.node.StartByte()) - 1
+		end := int(child.node.EndByte()) - int(n.node.StartByte()) - 1
+
+		if start < 0 || end < start || end > len(body) {
+			// Malformed or unexpected node positions; fall back to
+			// treating the whole substitution as an expression.
+			out.WriteString(ExpressionPlaceholder)
+			continue
+		}
+
+		if start < offset {
+			start = offset
+		}
+
+		out.WriteString(DecodeString("`" + body[offset:start] + "`"))
+		out.WriteString(ExpressionPlaceholder)
+		offset = end
+	}
+
+	out.WriteString(DecodeString("`" + body[offset:] + "`"))
+
+	return out.String()
+}
+
+// StringyValue returns the LiteralValue of a string-like Node, or an empty
+// string when the Node is not string-like.
+func (n *Node) StringyValue() string {
+	if !n.IsStringy() {
+		return ""
+	}
+	return n.LiteralValue()
+}
+
+// IsOutermostStringy returns true for a string-like Node that is not itself a
+// part of a larger string-like Node (e.g. a string concatenation or template).
+// It allows string matchers to evaluate a concatenated expression once rather
+// than reporting each of its constituent string literals separately.
+func (n *Node) IsOutermostStringy() bool {
+	if !n.IsValid() || !n.IsStringy() {
+		return false
+	}
+
+	parent := n.Parent()
+	for parent != nil && parent.IsValid() {
+		if parent.IsStringy() {
+			return false
+		}
+		parent = parent.Parent()
+	}
+
+	return true
+}
+
+// operator returns the operator of a binary_expression Node, or an empty
+// string for any other Node type.
+func (n *Node) operator() string {
+	if n.Type() != "binary_expression" {
+		return ""
+	}
+
+	// In tree-sitter the operator is the anonymous child sitting between
+	// the named "left" and "right" children, i.e. the second child.
+	for _, child := range n.Children() {
+		if !child.IsNamed() {
+			return child.Type()
+		}
+	}
+	return ""
+}
+
+// Line returns the 1-based line number on which the Node starts.
+func (n *Node) Line() int {
+	if !n.IsValid() {
+		return 0
+	}
+	return int(n.node.StartPoint().Row) + 1
+}
+
+// Column returns the 1-based column number at which the Node starts.
+func (n *Node) Column() int {
+	if !n.IsValid() {
+		return 0
+	}
+	return int(n.node.StartPoint().Column) + 1
 }
 
 // IsValid returns true if the *Node and the underlying
@@ -218,15 +378,14 @@ func (n *Node) DecodedString() string {
 // Go type, defaulting to a string containing the JavaScript
 // source for the Node. Return types are:
 //
-//   string => string
-//   number => int, float64
-//   object => map[string]any
-//   array  => []any
-//   false  => false
-//   true   => true
-//   null   => nil
-//   other  => string
-//
+//	string => string
+//	number => int, float64
+//	object => map[string]any
+//	array  => []any
+//	false  => false
+//	true   => true
+//	null   => nil
+//	other  => string
 func (n *Node) AsGoType() any {
 	if n == nil {
 		return nil
@@ -268,7 +427,14 @@ func (n *Node) AsMap() map[string]any {
 		}
 
 		key := DecodeString(pair.ChildByFieldName("key").RawString())
-		value := pair.ChildByFieldName("value").AsGoType()
+		valueNode := pair.ChildByFieldName("value")
+
+		var value any
+		if valueNode.IsStringy() {
+			value = valueNode.StringyValue()
+		} else {
+			value = valueNode.AsGoType()
+		}
 
 		out[key] = value
 	}

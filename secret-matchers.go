@@ -12,6 +12,15 @@ type Secret struct {
 	Filename string   `json:"filename,omitempty"`
 	Severity Severity `json:"severity"`
 	Context  any      `json:"context"`
+
+	// Line is the 1-based line number on which the match starts
+	Line int `json:"line,omitempty"`
+
+	// Column is the 1-based column number at which the match starts
+	Column int `json:"column,omitempty"`
+
+	// Source is the original, unmodified source code for the match
+	Source string `json:"source,omitempty"`
 }
 
 // Severity indicates how serious a finding is
@@ -50,6 +59,11 @@ func (a *Analyzer) GetSecrets() []*Secret {
 	// we only want to run each query once so let's cache them
 	nodeCache := make(map[string][]*Node)
 
+	// the same Node can be matched by multiple matchers; keep track of
+	// the kind of Secret each Node has already produced so we don't
+	// report the same value more than once
+	seen := make(map[*Node]map[string]bool)
+
 	matchers := AllSecretMatchers()
 
 	if a.userSecretMatchers != nil {
@@ -73,10 +87,38 @@ func (a *Analyzer) GetSecrets() []*Secret {
 				continue
 			}
 
+			// A single node can be matched by several different
+			// matchers. Only keep the first Secret of any given kind
+			// for each node, so the same value is not reported twice.
+			if kinds, exists := seen[n]; exists && kinds[match.Kind] {
+				continue
+			}
+			if seen[n] == nil {
+				seen[n] = make(map[string]bool)
+			}
+			seen[n][match.Kind] = true
+
+			match.populateLocation(n)
+
 			out = append(out, match)
 		}
 	}
 	return out
+}
+
+// populateLocation fills in the line, column and original source fields of
+// a Secret based on the Node that the Secret was matched against.
+func (s *Secret) populateLocation(n *Node) {
+	if s == nil || !n.IsValid() {
+		return
+	}
+
+	s.Line = n.Line()
+	s.Column = n.Column()
+
+	if s.Source == "" {
+		s.Source = n.Content()
+	}
 }
 
 // A SecretMatcher is a tree-sitter query to find relevant nodes
